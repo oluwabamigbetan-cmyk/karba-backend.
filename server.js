@@ -7,10 +7,10 @@ const PORT = process.env.PORT || 10000;
 const ALLOWED_ORIGIN = process.env.CORS_ORIGIN || '*';
 const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET;
 
-// CORS
+// CORS (allow your Vercel site)
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // allow curl/postman
+    if (!origin) return cb(null, true);                 // allow curl/postman
     if (ALLOWED_ORIGIN === '*' || origin === ALLOWED_ORIGIN) return cb(null, true);
     return cb(new Error('Not allowed by CORS: ' + origin));
   },
@@ -19,17 +19,16 @@ app.use(cors({
 
 app.use(express.json());
 
-// Health
+// Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
-// ---- reCAPTCHA v3 verifier ----
+// ---- reCAPTCHA v3 verification ----
 async function verifyRecaptchaV3(token) {
   if (!RECAPTCHA_SECRET) return { ok: false, reason: 'Missing RECAPTCHA_SECRET' };
   if (!token) return { ok: false, reason: 'Missing token' };
 
-  // Node 18+ has global fetch; this will work on Render
   const params = new URLSearchParams();
   params.append('secret', RECAPTCHA_SECRET);
   params.append('response', token);
@@ -40,31 +39,27 @@ async function verifyRecaptchaV3(token) {
     body: params
   });
 
-  const result = await r.json(); // {success, score, action, ...}
-
-  // Accept if Google says success and score is decent.
-  // (We don’t strictly require action=== 'lead' to reduce false negatives.)
-  const ok = result.success && (result.score ?? 0) >= 0.3;
+  const result = await r.json(); // { success, score, action, ... }
+  const ok = result.success && (result.score ?? 0) >= 0.3; // threshold 0.3
   return { ok, raw: result };
 }
 
-// Leads
+// Receive leads
 app.post('/api/leads', async (req, res) => {
   try {
     const { recaptchaToken, fullName, email, phone, service, message } = req.body || {};
 
-    // 1) Verify reCAPTCHA
+    // 1) Verify reCAPTCHA (this is the critical part)
     const check = await verifyRecaptchaV3(recaptchaToken);
     if (!check.ok) {
       return res.status(403).json({ ok: false, error: 'Failed reCAPTCHA', details: check.raw || check.reason });
     }
 
     // 2) TODO: save to DB / send email here
-    // For now, echo back what we received (without the token)
     return res.json({
       ok: true,
-      received: { fullName, email, phone, service, message },
-      note: 'reCAPTCHA passed'
+      note: 'reCAPTCHA passed',
+      received: { fullName, email, phone, service, message }
     });
   } catch (err) {
     console.error('Lead error:', err);
