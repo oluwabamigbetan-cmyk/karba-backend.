@@ -1,85 +1,98 @@
 // server.js
-// KARBA backend with reCAPTCHA v3 verification
+// Minimal Express backend with CORS + reCAPTCHA v3 verification
 
-const express = require('express');
-const cors = require('cors');
+import express from "express";
+import cors from "cors";
 
-const app = express();
-
-// --- ENV ---
+// ---- ENV ----
 const PORT = process.env.PORT || 10000;
-const ALLOWED_ORIGIN = process.env.CORS_ORIGIN || '*';
-const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET; // from Google admin (keep private)
+const RECAPTCHA_SECRET = process.env.RECAPTCHA_SECRET || "";
+const ORIGINS = [
+  ...(process.env.CORS_ORIGIN ? [process.env.CORS_ORIGIN] : []),
+  ...(process.env.CORS_ORIGIN_2 ? [process.env.CORS_ORIGIN_2] : []),
+].filter(Boolean);
 
-// --- MIDDLEWARE ---
-app.use(cors({
-  origin: (origin, cb) => {
-    // allow server-to-server/no-origin requests (curl, render health checks)
-    if (!origin) return cb(null, true);
-    if (ALLOWED_ORIGIN === '*' || origin === ALLOWED_ORIGIN) return cb(null, true);
-    return cb(new Error('Not allowed by CORS: ' + origin));
-  },
-  methods: ['GET', 'POST', 'OPTIONS'],
-}));
+// ---- APP ----
+const app = express();
 app.use(express.json());
 
-// --- HEALTH ---
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString() });
+// CORS (allow exactly your Vercel site)
+app.use(
+  cors({
+    origin: function (origin, cb) {
+      // Allow same-origin / server-to-server / curl (no Origin)
+      if (!origin) return cb(null, true);
+      if (ORIGINS.includes(origin)) return cb(null, true);
+      cb(new Error(`CORS blocked: ${origin}`));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+  })
+);
+
+// Health check
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok", time: new Date().toISOString() });
 });
 
-// --- reCAPTCHA v3 VERIFY ---
+// Verify reCAPTCHA v3 with Google
 async function verifyRecaptchaV3(token) {
-  if (!RECAPTCHA_SECRET) return { ok: false, reason: 'Missing RECAPTCHA_SECRET' };
-  if (!token)            return { ok: false, reason: 'Missing token' };
-
-  // Build form body Google expects: secret + response
-  const params = new URLSearchParams();
-  params.append('secret', RECAPTCHA_SECRET);
-  params.append('response', token);
-
-  // IMPORTANT: correct URL uses "api" (not "qpi")
-  const r = await fetch('https://www.google.com/recaptcha/api/siteverify', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params
+  if (!RECAPTCHA_SECRET) {
+    return { ok: false, reason: "missing-secret" };
+  }
+  const url = "https://www.google.com/recaptcha/api/siteverify";
+  const body = new URLSearchParams({
+    secret: RECAPTCHA_SECRET,
+    response: token || "",
   });
 
-  const result = await r.json(); // { success, score, action, ... }
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  const json = await r.json().catch(() => ({}));
 
-  // Accept if Google says success and score is decent (threshold 0.3)
-  const ok = result.success && (result.score ?? 0) >= 0.3;
-  return { ok, raw: result };
+  // Accept if success and score ≥ 0.3
+  const ok = !!json.success && (json.score ?? 0) >= 0.3;
+  return { ok, raw: json };
 }
 
-// --- LEADS ---
-app.post('/api/leads', async (req, res) => {
+// Leads endpoint
+app.post("/api/leads", async (req, res) => {
   try {
-    const { recaptchaToken, fullName, email, phone, service, message } = req.body || {};
+    const {
+      fullName = "",
+      email = "",
+      phone = "",
+      service = "",
+      message = "",
+      recaptchaToken = "",
+    } = req.body || {};
 
-    // 1) reCAPTCHA check
-    const check = await verifyRecaptchaV3(recaptchaToken);
-    if (!check.ok) {
-      return res.status(403).json({
-        ok: false,
-        error: 'Failed reCAPTCHA',
-        details: check.raw || check.reason
-      });
+    // Basic validation
+    if (!fullName || !email) {
+      return res.status(400).json({ ok: false, error: "Missing name or email" });
     }
 
-    // 2) TODO: save to DB / send email — for now just echo back
-    return res.json({
-      ok: true,
-      note: 'reCAPTCHA passed',
-      received: { fullName, email, phone, service, message }
-    });
+    // reCAPTCHA check
+    const verdict = await verifyRecaptchaV3(recaptchaToken);
+    if (!verdict.ok) {
+      return res
+        .status(403)
+        .json({ ok: false, error: "Failed reCAPTCHA", details: verdict.raw || verdict.reason });
+    }
+
+    // TODO: persist or notify (email/Sheet/DB). For now, echo back.
+    const received = { fullName, email, phone, service, message };
+    return res.json({ ok: true, received });
   } catch (err) {
-    console.error('Lead error:', err);
-    return res.status(500).json({ ok: false, error: 'Server error' });
+    console.error("Lead error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// --- START ---
+// ---- START ----
 app.listen(PORT, () => {
   console.log(`KARBA backend listening on ${PORT}`);
+  console.log("Allowed origins:", ORIGINS);
 });
