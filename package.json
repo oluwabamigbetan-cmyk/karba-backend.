@@ -2,17 +2,12 @@
   "name": "karba-backend",
   "version": "1.0.0",
   "type": "module",
-  "engines": {
-    "node": "20.x"
-  },
+  "engines": { "node": ">=18" },
   "scripts": {
-    "start": "node server.js",
-    "start:prod": "node server.js"
+    "start": "node server.js"
   },
-   "dependencies": {
-    "express": "^4.19.2",
-    "cors": "^2.8.5"
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
   }
 }
-
- 
