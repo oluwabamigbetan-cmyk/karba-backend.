@@ -1,56 +1,55 @@
-// server.js
-import express from 'express';
-import cors from 'cors';
-import fetch from 'node-fetch';
-import nodemailer from 'nodemailer';
-
-const {
-  PORT = 10000,
-  CORS_ORIGIN = '',                 // e.g. https://karba-site.vercel.app
-  RECAPTCHA_SECRET = '',            // from Google (secret key)
-  SMTP_HOST = '',
-  SMTP_PORT = '587',
-  SMTP_USER = '',
-  SMTP_PASS = '',
-  EMAIL_FROM = '',                  // e.g. "KARBA Leads <no-reply@yourdomain.com>"
-  EMAIL_TO = ''                     // where you receive leads
-} = process.env;
-
-if (!RECAPTCHA_SECRET) console.warn('[WARN] RECAPTCHA_SECRET is missing.');
-if (!EMAIL_TO)          console.warn('[WARN] EMAIL_TO is missing (emails won’t be sent).');
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import nodemailer from "nodemailer";
 
 const app = express();
+const PORT = process.env.PORT || 10000;
 
-// CORS
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!CORS_ORIGIN) return cb(null, true);
-    const ok = origin ? origin === CORS_ORIGIN : true; // allow server-to-server/no-origin
-    cb(ok ? null : new Error('Not allowed by CORS'), ok);
-  }
-}));
+// Load environment variables
+const {
+  RECAPTCHA_SECRET,
+  SMTP_HOST,
+  SMTP_PORT,
+  SMTP_USER,
+  SMTP_PASS,
+  EMAIL_FROM,
+  EMAIL_TO,
+  CORS_ORIGIN,
+} = process.env;
+
+// Middleware
 app.use(express.json());
 
-// Health
-app.get('/api/health', (req, res) => {
+// CORS
+app.use(
+  cors({
+    origin: CORS_ORIGIN || "*",
+  })
+);
+
+// Health check
+app.get("/api/health", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
-// Helpers
+// --- Helpers ---
 async function verifyRecaptcha(token, remoteIp) {
-  const url = 'https://www.google.com/recaptcha/api/siteverify';
+  const url = "https://www.google.com/recaptcha/api/siteverify";
   const params = new URLSearchParams();
-  params.append('secret', RECAPTCHA_SECRET);
-  params.append('response', token);
-  if (remoteIp) params.append('remoteip', remoteIp);
+  params.append("secret", RECAPTCHA_SECRET);
+  params.append("response", token);
+  if (remoteIp) params.append("remoteip", remoteIp);
 
-  const r = await fetch(url, { method: 'POST', body: params });
+  const r = await fetch(url, { method: "POST", body: params });
   const j = await r.json().catch(() => ({}));
   return j; // { success, score, action, ... }
 }
 
 function buildMailTransport() {
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !EMAIL_FROM || !EMAIL_TO) return null;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !EMAIL_FROM || !EMAIL_TO) {
+    return null;
+  }
 
   return nodemailer.createTransport({
     host: SMTP_HOST,
@@ -60,66 +59,54 @@ function buildMailTransport() {
   });
 }
 
-function leadToHtml(lead) {
-  const esc = (s='') => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  return `
-    <h2>New Lead</h2>
-    <ul>
-      <li><b>Name:</b> ${esc(lead.name)}</li>
-      <li><b>Email:</b> ${esc(lead.email)}</li>
-      <li><b>Phone:</b> ${esc(lead.phone || '')}</li>
-      <li><b>Service:</b> ${esc(lead.service)}</li>
-      <li><b>Message:</b><br>${esc(lead.message || '').replace(/\n/g,'<br>')}</li>
-      <li><b>Submitted:</b> ${new Date().toLocaleString()}</li>
-    </ul>
-  `;
-}
-
-// Save + Notify
-app.post('/api/leads', async (req, res) => {
+// --- Routes ---
+app.post("/api/leads", async (req, res) => {
   try {
-    const { name, email, phone, service, message, recaptchaToken } = req.body || {};
-    if (!name || !email || !service) {
-      return res.status(400).json({ ok: false, error: 'Missing required fields.' });
-    }
-    if (!recaptchaToken) {
-      return res.status(400).json({ ok: false, error: 'Missing reCAPTCHA token.' });
+    const { name, email, phone, service, message, recaptchaToken } = req.body;
+
+    // Validate reCAPTCHA
+    const recap = await verifyRecaptcha(
+      recaptchaToken,
+      req.headers["x-forwarded-for"] || req.socket.remoteAddress
+    );
+
+    if (!recap.success || recap.score < 0.3) {
+      return res.status(403).json({ error: "Failed reCAPTCHA", recap });
     }
 
-    // Verify reCAPTCHA v3
-    const remoteIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
-    const verdict = await verifyRecaptcha(recaptchaToken, remoteIp);
-    if (!verdict?.success) {
-      return res.status(403).json({ ok: false, error: 'Failed reCAPTCHA', details: verdict });
-    }
-    // Optional scoring policy (tweak threshold if needed)
-    if (typeof verdict.score === 'number' && verdict.score < 0.3) {
-      return res.status(403).json({ ok: false, error: 'Low reCAPTCHA score', details: verdict });
-    }
-
-    // TODO: persist to DB or Google Sheet here if you want
-
-    // Send email (if SMTP env is set)
+    // Prepare email
     const transport = buildMailTransport();
     if (transport) {
-      const html = leadToHtml({ name, email, phone, service, message });
-      await transport.sendMail({
+      const mailOptions = {
         from: EMAIL_FROM,
         to: EMAIL_TO,
-        subject: `New Lead: ${name} — ${service}`,
-        html,
-        text: html.replace(/<[^>]+>/g, ''), // simple plaintext
-      });
+        subject: `New Lead from ${name}`,
+        text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone}\nService: ${service}\nMessage: ${message}`,
+      };
+
+      await transport.sendMail(mailOptions);
+      console.log("[SMTP] Lead email sent");
     }
 
-    res.json({ ok: true, message: 'Lead saved' });
+    res.json({ ok: true, message: "Lead received" });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: 'Internal Server Error' });
+    console.error("Lead error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// Start
+// Start server
 app.listen(PORT, () => {
-  console.log(`Server listening on ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
+
+// === Verify SMTP at startup ===
+const transport = buildMailTransport();
+if (transport) {
+  transport
+    .verify()
+    .then(() => console.log("[SMTP] OK: ready to send"))
+    .catch((err) => console.error("[SMTP] FAIL", err));
+} else {
+  console.warn("[SMTP] Missing environment variables, mail disabled");
+}
