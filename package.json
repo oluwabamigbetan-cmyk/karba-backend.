@@ -1,17 +1,15 @@
 {
   "name": "karba-backend",
-  "version": "1.0.0",
+  "private": true,
   "type": "module",
-  "engines": {
-    "node": "20.x"
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.13"
   },
   "scripts": {
     "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.19.2",
-    "cors": "^2.8.5",
-    "morgan": "^1.10.0",
-    "dotenv": "^16.4.5"
   }
 }
