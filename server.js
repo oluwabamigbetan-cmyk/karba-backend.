@@ -13,11 +13,9 @@ app.use(express.json());
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
 // Always allow Render health checks
 app.use(cors({
-  origin(origin, cb) {
-    if (!origin) return cb(null, true); // curl / server-to-server
-    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(new Error("CORS blocked for origin: " + origin), false);
-  }
+  origin: ['https://karba-site.vercel.app'],
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type']
 }));
 
 // ----- Health
