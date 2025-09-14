@@ -1,112 +1,99 @@
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
 import nodemailer from "nodemailer";
 
+// If running locally, uncomment:
+// import dotenv from "dotenv";
+// dotenv.config();
+
 const app = express();
-const PORT = process.env.PORT || 10000;
-
-// Load environment variables
-const {
-  RECAPTCHA_SECRET,
-  SMTP_HOST,
-  SMTP_PORT,
-  SMTP_USER,
-  SMTP_PASS,
-  EMAIL_FROM,
-  EMAIL_TO,
-  CORS_ORIGIN,
-} = process.env;
-
-// Middleware
 app.use(express.json());
 
-// CORS
-app.use(
-  cors({
-    origin: CORS_ORIGIN || "*",
-  })
-);
+// ----- CORS
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
+// Always allow Render health checks
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true); // curl / server-to-server
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error("CORS blocked for origin: " + origin), false);
+  }
+}));
 
-// Health check
+// ----- Health
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
-// --- Helpers ---
-async function verifyRecaptcha(token, remoteIp) {
-  const url = "https://www.google.com/recaptcha/api/siteverify";
-  const params = new URLSearchParams();
-  params.append("secret", RECAPTCHA_SECRET);
-  params.append("response", token);
-  if (remoteIp) params.append("remoteip", remoteIp);
-
-  const r = await fetch(url, { method: "POST", body: params });
+// ----- reCAPTCHA verify
+async function verifyRecaptcha(token, ip) {
+  const secret = process.env.RECAPTCHA_SECRET;
+  if (!secret || !token) return { success: false, score: 0, reason: "missing" };
+  const r = await fetch("https://www.google.com/recaptcha/api/siteverify", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ secret, response: token, remoteip: ip })
+  });
   const j = await r.json().catch(() => ({}));
-  return j; // { success, score, action, ... }
+  return j;
 }
 
-function buildMailTransport() {
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !EMAIL_FROM || !EMAIL_TO) {
-    return null;
-  }
-
+// ----- Mail transport
+function buildTransport() {
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) throw new Error("Missing SMTP env");
   return nodemailer.createTransport({
     host: SMTP_HOST,
-    port: Number(SMTP_PORT || 587),
-    secure: Number(SMTP_PORT) === 465, // true for 465, false for others
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
+    port: Number(SMTP_PORT),
+    secure: Number(SMTP_PORT) === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS }
   });
 }
 
-// --- Routes ---
+// ----- Lead endpoint
 app.post("/api/leads", async (req, res) => {
   try {
-    const { name, email, phone, service, message, recaptchaToken } = req.body;
+    const { name, email, phone, service, message, recaptchaToken } = req.body || {};
+    if (!name || !email || !service) return res.status(400).json({ ok: false, message: "Missing name, email, or service." });
 
-    // Validate reCAPTCHA
-    const recap = await verifyRecaptcha(
-      recaptchaToken,
-      req.headers["x-forwarded-for"] || req.socket.remoteAddress
-    );
-
-    if (!recap.success || recap.score < 0.3) {
-      return res.status(403).json({ error: "Failed reCAPTCHA", recap });
+    // reCAPTCHA
+    const rc = await verifyRecaptcha(recaptchaToken, req.ip);
+    if (!rc.success || (rc.score ?? 0) < 0.5) {
+      return res.status(400).json({ ok: false, message: "reCAPTCHA failed", details: rc });
     }
 
-    // Prepare email
-    const transport = buildMailTransport();
-    if (transport) {
-      const mailOptions = {
-        from: EMAIL_FROM,
-        to: EMAIL_TO,
-        subject: `New Lead from ${name}`,
-        text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone}\nService: ${service}\nMessage: ${message}`,
-      };
+    // send email
+    const EMAIL_FROM = process.env.EMAIL_FROM || process.env.SMTP_USER;
+    const EMAIL_TO = process.env.EMAIL_TO || process.env.SMTP_USER;
+    const transport = buildTransport();
 
-      await transport.sendMail(mailOptions);
-      console.log("[SMTP] Lead email sent");
-    }
+    const subject = `New Lead from ${name}`;
+    const html = `
+      <h2>${subject}</h2>
+      <p><strong>Name:</strong> ${name}</p>
+      <p><strong>Email:</strong> ${email}</p>
+      <p><strong>Phone:</strong> ${phone || ""}</p>
+      <p><strong>Service:</strong> ${service}</p>
+      <p><strong>Message:</strong> ${message || ""}</p>
+    `;
+
+    await transport.sendMail({
+      from: EMAIL_FROM,
+      to: EMAIL_TO,
+      subject,
+      html,
+      replyTo: email
+    });
 
     res.json({ ok: true, message: "Lead received" });
   } catch (err) {
-    console.error("Lead error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("[LEADS ERROR]", err);
+    res.status(500).json({ ok: false, message: "Server error" });
   }
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Avoid favicon noise
+app.get("/favicon.ico", (req, res) => res.status(204).end());
 
-// === Verify SMTP at startup ===
-const transport = buildMailTransport();
-if (transport) {
-  transport
-    .verify()
-    .then(() => console.log("[SMTP] OK: ready to send"))
-    .catch((err) => console.error("[SMTP] FAIL", err));
-} else {
-  console.warn("[SMTP] Missing environment variables, mail disabled");
-}
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log("KARBA backend listening on", PORT));
