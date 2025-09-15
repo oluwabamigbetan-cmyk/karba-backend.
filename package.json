@@ -1,5 +1,5 @@
 {
-  "name": "karba-backend",
+  "name": "karba-backend.",
   "type": "module",
   "version": "1.0.0",
   "scripts": { "start": "node server.js" },
