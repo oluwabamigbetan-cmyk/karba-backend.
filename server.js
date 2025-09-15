@@ -1,120 +1,104 @@
-// KARBA backend: Express + Nodemailer + optional reCAPTCHA v3
-const express = require('express');
-const cors = require('cors');
-const nodemailer = require('nodemailer');
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import nodemailer from "nodemailer";
+import fetch from "node-fetch";
 
 const app = express();
-
-// ---------- ENV ----------
-const {
-  PORT = 3000,
-  EMAIL_FROM,
-  EMAIL_TO,
-  SMTP_HOST,
-  SMTP_PORT = 465,
-  SMTP_USER,
-  SMTP_PASS,
-  RECAPTCHA_SECRET,                // optional (server-side secret)
-  CORS_ORIGINS = '*'               // comma-separated list or "*"
-} = process.env;
-
-// ---------- CORS ----------
-const allowList = CORS_ORIGINS === '*'
-  ? null
-  : CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean);
-
-app.use(cors({
-  origin: allowList ? (origin, cb) => {
-    if (!origin || allowList.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS blocked for origin ${origin}`));
-  } : true
-}));
-
 app.use(express.json());
 
-// ---------- HEALTH ----------
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
+/** CORS: allow Vercel front-end (and localhost for testing) */
+const ALLOWED = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin(origin, cb){
+    if (!origin) return cb(null, true); // curl / server-to-server
+    const ok = ALLOWED.some(a => origin.endsWith(a) || origin === a);
+    return ok ? cb(null, true) : cb(new Error(`CORS blocked for origin ${origin}`));
+  }
+}));
+
+/** Health */
+app.get("/api/health", (req,res) => {
+  res.json({ ok:true, time:new Date().toISOString() });
 });
 
-// ---------- RECAPTCHA VERIFY (if configured) ----------
-async function verifyRecaptcha(token) {
-  if (!RECAPTCHA_SECRET) return { ok: true, skipped: true };
-  if (!token) return { ok: false, reason: 'missing-token' };
-
-  try {
-    const params = new URLSearchParams();
-    params.set('secret', RECAPTCHA_SECRET);
-    params.set('response', token);
-
-    const r = await fetch('https://www.google.com/recaptcha/api/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString()
-    });
-    const data = await r.json();
-    if (data.success) return { ok: true, score: data.score ?? null };
-    return { ok: false, reason: 'recaptcha-failed', details: data['error-codes'] };
-  } catch (e) {
-    return { ok: false, reason: 'recaptcha-error', details: e.message };
-  }
-}
-
-// ---------- MAIL TRANSPORT ----------
-function buildTransport() {
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !EMAIL_TO || !EMAIL_FROM) {
-    throw new Error('Missing SMTP_* or EMAIL_* env vars');
+/** Mail transport (Gmail SMTP using App Password) */
+function buildTransport(){
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
+    throw new Error("Missing SMTP env");
   }
   return nodemailer.createTransport({
     host: SMTP_HOST,
-    port: Number(SMTP_PORT),
-    secure: Number(SMTP_PORT) === 465,
+    port: Number(SMTP_PORT) || 465,
+    secure: true,
     auth: { user: SMTP_USER, pass: SMTP_PASS }
   });
 }
 
-// ---------- LEAD ENDPOINT ----------
-app.post('/api/leads', async (req, res) => {
-  const { name, email, phone, service, message, recaptchaToken } = req.body || {};
+/** Verify reCAPTCHA v3 server-side */
+async function verifyRecaptcha(token){
+  const secret = process.env.RECAPTCHA_SECRET;
+  if (!secret) return { ok:false, reason:"missing secret" };
+  if (!token)  return { ok:false, reason:"missing token" };
 
-  if (!name || !email || !service) {
-    return res.status(400).json({ ok: false, message: 'name, email, and service are required' });
-  }
+  const r = await fetch("https://www.google.com/recaptcha/api/siteverify", {
+    method:"POST",
+    headers: { "Content-Type":"application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ secret, response: token })
+  });
+  const j = await r.json();
+  // Accept score >= 0.5
+  return { ok: !!(j.success && (j.score ?? 0) >= 0.5), raw: j };
+}
 
-  const recap = await verifyRecaptcha(recaptchaToken);
-  if (!recap.ok) {
-    return res.status(400).json({ ok: false, message: 'reCAPTCHA failed', details: recap });
-  }
-
+/** Lead endpoint */
+app.post("/api/leads", async (req,res) => {
   try {
+    const { name, email, phone, service, message, recaptchaToken } = req.body || {};
+    if (!name || !email || !service) {
+      return res.status(400).json({ ok:false, message:"Missing name, email, or service." });
+    }
+
+    const v = await verifyRecaptcha(recaptchaToken);
+    if (!v.ok) {
+      return res.status(400).json({ ok:false, message:"reCAPTCHA failed", details:v.raw || v.reason });
+    }
+
+    const EMAIL_FROM = process.env.EMAIL_FROM || `KARBA Leads desk <${process.env.SMTP_USER}>`;
+    const EMAIL_TO   = process.env.EMAIL_TO   || process.env.SMTP_USER;
+
     const transport = buildTransport();
-    const subject = `New Lead: ${name} (${service})`;
+    const subject = `New Lead from ${name}`;
     const html = `
-      <h2>New Consultation Lead</h2>
       <p><strong>Name:</strong> ${name}</p>
       <p><strong>Email:</strong> ${email}</p>
-      <p><strong>Phone:</strong> ${phone || '-'}</p>
+      <p><strong>Phone:</strong> ${phone || "-"}</p>
       <p><strong>Service:</strong> ${service}</p>
-      <p><strong>Message:</strong></p>
-      <p style="white-space:pre-wrap;">${message || '-'}</p>
+      <p><strong>Message:</strong><br/>${(message || "").replace(/\n/g,"<br/>")}</p>
     `;
 
     await transport.sendMail({
       from: EMAIL_FROM,
       to: EMAIL_TO,
-      replyTo: email,
       subject,
-      html
+      html,
+      replyTo: email
     });
 
-    res.json({ ok: true, message: 'Lead sent' });
+    res.json({ ok:true, message:"Lead sent" });
   } catch (err) {
-    console.error('[MAIL ERROR]', err);
-    res.status(500).json({ ok: false, message: 'Server mail error' });
+    console.error("[LEADS_ERROR]", err);
+    res.status(500).json({ ok:false, message:"Server error" });
   }
 });
 
-// ---------- START ----------
+/** Start */
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`KARBA backend listening on ${PORT}`);
 });
