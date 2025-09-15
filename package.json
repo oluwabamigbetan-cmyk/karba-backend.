@@ -1,32 +1,16 @@
 {
   "name": "karba-backend",
   "version": "1.0.0",
-  "description": "Backend API for Karba Financial Consultant website (leads form, reCAPTCHA, email notifications)",
+  "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "axios": "^1.7.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "nodemailer": "^6.9.13"
   },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
-  },
-  "engines": {
-    "node": ">=18.x"
-  },
-  "keywords": [
-    "express",
-    "recaptcha",
-    "nodemailer",
-    "lead-form",
-    "backend"
-  ],
-  "author": "Karba Financial Consultant",
-  "license": "MIT"
+  "engines": { "node": ">=18" }
 }
