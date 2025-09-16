@@ -7,13 +7,21 @@ import "dotenv/config";
 const app = express();
 app.use(express.json());
 
-// CORS: allow your Vercel site + (optionally) localhost for testing
-const allow = (process.env.CORS_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
+// ---- CORS (allow production + localhost + vercel previews for this project)
+const allowed = [
+  'https://karba-site.vercel.app', // prod
+  'http://localhost:5500', // local file server (e.g. Live Server)
+  'http://localhost:3000', // if you ever use a dev server
+];
+
+const ORIGIN_RE = /^https:\/\/karba-site.*\.vercel\.app$/i; // any preview branch
+
 app.use(cors({
   origin(origin, cb) {
-    // no Origin for server-to-server or curl -> allow
-    if (!origin) return cb(null, true);
-    if (allow.length && allow.includes(origin)) return cb(null, true);
+    if (!origin) return cb(null, true); // allow curl/postman
+    if (allowed.includes(origin) || ORIGIN_RE.test(origin)) {
+      return cb(null, true);
+    }
     cb(new Error(`CORS blocked for origin ${origin}`));
   }
 }));
