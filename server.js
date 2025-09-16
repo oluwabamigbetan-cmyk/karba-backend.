@@ -7,14 +7,16 @@ import "dotenv/config";
 const app = express();
 app.use(express.json());
 
-// ---- CORS (allow production + localhost + vercel previews for this project)
+// ----- CORS (allow production + localhost + vercel previews for this project)
 const allowed = [
-  'https://karba-site.vercel.app', // prod
-  'http://localhost:5500', // local file server (e.g. Live Server)
-  'http://localhost:3000', // if you ever use a dev server
+  "https://karba-site.vercel.app", // old Vercel domain
+  "https://karbafinancialconsultant.com", // new custom domain (no www)
+  "https://www.karbafinancialconsultant.com", // new custom domain (www)
+  "http://localhost:5000", // local dev server
+  "http://localhost:3000" // local dev server
 ];
 
-const ORIGIN_RE = /^https:\/\/karba-site.*\.vercel\.app$/i; // any preview branch
+const ORIGIN_RE = /^https:\/\/karba-site-.*\.vercel\.app$/; // any preview branch
 
 app.use(cors({
   origin(origin, cb) {
